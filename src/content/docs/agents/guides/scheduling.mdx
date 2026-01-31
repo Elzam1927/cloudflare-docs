@@ -1,0 +1,362 @@
+---
+title: Scheduling
+pcx_content_type: guide
+sidebar:
+  order: 2
+---
+
+import { TypeScriptExample } from "~/components";
+
+Schedule tasks to run in the future — whether that is seconds from now, at a specific date/time, or on a recurring cron schedule. Scheduled tasks survive agent restarts and are persisted to SQLite.
+
+## Overview
+
+The scheduling system supports four modes:
+
+| Mode          | Syntax                              | Use Case                  |
+| ------------- | ----------------------------------- | ------------------------- |
+| **Delayed**   | `this.schedule(60, ...)`            | Run in 60 seconds         |
+| **Scheduled** | `this.schedule(new Date(...), ...)` | Run at specific time      |
+| **Cron**      | `this.schedule("0 8 * * *", ...)`   | Run on recurring schedule |
+| **Interval**  | `this.scheduleEvery(30, ...)`       | Run every 30 seconds      |
+
+Under the hood, scheduling uses Durable Object alarms to wake the agent at the right time. Tasks are stored in a SQLite table and executed in order.
+
+## Quick Start
+
+<TypeScriptExample>
+```typescript
+import { Agent } from "agents";
+
+export class ReminderAgent extends Agent {
+  async onRequest(request: Request) {
+    const url = new URL(request.url);
+
+    // Schedule in 30 seconds
+    await this.schedule(30, "sendReminder", {
+      message: "Check your email"
+    });
+
+    // Schedule at specific time
+    await this.schedule(new Date("2025-02-01T09:00:00Z"), "sendReminder", {
+      message: "Monthly report due"
+    });
+
+    // Schedule recurring (every day at 8am)
+    await this.schedule("0 8 * * *", "dailyDigest", {
+      userId: url.searchParams.get("userId")
+    });
+
+    return new Response("Scheduled!");
+  }
+
+  async sendReminder(payload: { message: string }) {
+    console.log(`Reminder: ${payload.message}`);
+    // Send notification, email, etc.
+  }
+
+  async dailyDigest(payload: { userId: string }) {
+    console.log(`Sending daily digest to ${payload.userId}`);
+    // Generate and send digest
+  }
+}
+```
+</TypeScriptExample>
+
+## Scheduling Modes
+
+### Delayed Execution
+
+Pass a number to schedule a task to run after a delay in **seconds**:
+
+<TypeScriptExample>
+```typescript
+// Run in 10 seconds
+await this.schedule(10, "processTask", { taskId: "123" });
+
+// Run in 5 minutes (300 seconds)
+await this.schedule(300, "sendFollowUp", { email: "user@example.com" });
+
+// Run in 1 hour
+await this.schedule(3600, "checkStatus", { orderId: "abc" });
+```
+</TypeScriptExample>
+
+### Scheduled Execution
+
+Pass a `Date` object to schedule a task at a specific time:
+
+<TypeScriptExample>
+```typescript
+// Run tomorrow at noon
+const tomorrow = new Date();
+tomorrow.setDate(tomorrow.getDate() + 1);
+tomorrow.setHours(12, 0, 0, 0);
+await this.schedule(tomorrow, "sendReminder", { message: "Meeting time!" });
+
+// Run at a specific timestamp
+await this.schedule(new Date("2025-06-15T14:30:00Z"), "triggerEvent", {
+  eventId: "conference-2025"
+});
+```
+</TypeScriptExample>
+
+### Recurring (Cron)
+
+Pass a cron expression string for recurring schedules:
+
+<TypeScriptExample>
+```typescript
+// Every day at 8:00 AM
+await this.schedule("0 8 * * *", "dailyReport", {});
+
+// Every hour
+await this.schedule("0 * * * *", "hourlyCheck", {});
+
+// Every Monday at 9:00 AM
+await this.schedule("0 9 * * 1", "weeklySync", {});
+
+// Every 15 minutes
+await this.schedule("*/15 * * * *", "pollForUpdates", {});
+
+// First day of every month at midnight
+await this.schedule("0 0 1 * *", "monthlyCleanup", {});
+```
+</TypeScriptExample>
+
+**Cron syntax:** `minute hour day month weekday`
+
+**Common patterns:**
+
+```typescript
+"* * * * *"; // Every minute
+"*/5 * * * *"; // Every 5 minutes
+"0 * * * *"; // Every hour (on the hour)
+"0 0 * * *"; // Every day at midnight
+"0 8 * * 1-5"; // Weekdays at 8am
+"0 0 * * 0"; // Every Sunday at midnight
+"0 0 1 * *"; // First of every month
+```
+
+### Interval
+
+Use `scheduleEvery()` to run a task at fixed intervals (in seconds). Unlike cron, intervals support sub-minute precision and arbitrary durations:
+
+<TypeScriptExample>
+```typescript
+// Poll every 30 seconds
+await this.scheduleEvery(30, "poll", { source: "api" });
+
+// Health check every 45 seconds
+await this.scheduleEvery(45, "healthCheck", {});
+
+// Sync every 90 seconds (1.5 minutes - cannot be expressed in cron)
+await this.scheduleEvery(90, "syncData", { destination: "warehouse" });
+```
+</TypeScriptExample>
+
+## Managing Schedules
+
+### Get a Schedule
+
+Retrieve a scheduled task by its ID:
+
+<TypeScriptExample>
+```typescript
+const schedule = await this.getSchedule(scheduleId);
+
+if (schedule) {
+  console.log(
+    `Task ${schedule.id} will run at ${new Date(schedule.time * 1000)}`
+  );
+  console.log(`Callback: ${schedule.callback}`);
+  console.log(`Type: ${schedule.type}`); // "scheduled" | "delayed" | "cron" | "interval"
+}
+```
+</TypeScriptExample>
+
+### List Schedules
+
+Query scheduled tasks with optional filters:
+
+<TypeScriptExample>
+```typescript
+// Get all scheduled tasks
+const allSchedules = this.getSchedules();
+
+// Get only cron jobs
+const cronJobs = this.getSchedules({ type: "cron" });
+
+// Get tasks in the next hour
+const upcoming = this.getSchedules({
+  timeRange: {
+    start: new Date(),
+    end: new Date(Date.now() + 60 * 60 * 1000)
+  }
+});
+```
+</TypeScriptExample>
+
+### Cancel a Schedule
+
+Remove a scheduled task before it executes:
+
+<TypeScriptExample>
+```typescript
+const cancelled = await this.cancelSchedule(scheduleId);
+
+if (cancelled) {
+  console.log("Schedule cancelled successfully");
+} else {
+  console.log("Schedule not found (may have already executed)");
+}
+```
+</TypeScriptExample>
+
+## Patterns
+
+### Rescheduling from Callbacks
+
+For dynamic recurring schedules, schedule the next run from within the callback:
+
+<TypeScriptExample>
+```typescript
+class PollingAgent extends Agent {
+  async startPolling(intervalSeconds: number) {
+    await this.schedule(intervalSeconds, "poll", { interval: intervalSeconds });
+  }
+
+  async poll(payload: { interval: number }) {
+    try {
+      const data = await fetch("https://api.example.com/updates");
+      await this.processUpdates(await data.json());
+    } catch (error) {
+      console.error("Polling failed:", error);
+    }
+
+    // Schedule the next poll (regardless of success/failure)
+    await this.schedule(payload.interval, "poll", payload);
+  }
+}
+```
+</TypeScriptExample>
+
+### Exponential Backoff Retry
+
+<TypeScriptExample>
+```typescript
+class RetryAgent extends Agent {
+  async attemptTask(payload: {
+    taskId: string;
+    attempt: number;
+    maxAttempts: number;
+  }) {
+    try {
+      await this.doWork(payload.taskId);
+      console.log(
+        `Task ${payload.taskId} succeeded on attempt ${payload.attempt}`
+      );
+    } catch (error) {
+      if (payload.attempt >= payload.maxAttempts) {
+        console.error(
+          `Task ${payload.taskId} failed after ${payload.maxAttempts} attempts`
+        );
+        return;
+      }
+
+      // Exponential backoff: 2^attempt seconds (2s, 4s, 8s, 16s...)
+      const delaySeconds = Math.pow(2, payload.attempt);
+
+      await this.schedule(delaySeconds, "attemptTask", {
+        ...payload,
+        attempt: payload.attempt + 1
+      });
+
+      console.log(`Retrying task ${payload.taskId} in ${delaySeconds}s`);
+    }
+  }
+
+  async doWork(taskId: string) {
+    // Your actual work here
+  }
+}
+```
+</TypeScriptExample>
+
+## API Reference
+
+### schedule()
+
+<TypeScriptExample>
+```typescript
+async schedule<T = string>(
+  when: Date | string | number,
+  callback: keyof this,
+  payload?: T
+): Promise<Schedule<T>>
+```
+</TypeScriptExample>
+
+Schedule a task for future execution.
+
+**Parameters:**
+
+- `when` - When to execute: `number` (seconds delay), `Date` (specific time), or `string` (cron expression)
+- `callback` - Name of the method to call
+- `payload` - Data to pass to the callback (must be JSON-serializable)
+
+**Returns:** A `Schedule` object with the task details
+
+### scheduleEvery()
+
+<TypeScriptExample>
+```typescript
+async scheduleEvery<T = string>(
+  intervalSeconds: number,
+  callback: keyof this,
+  payload?: T
+): Promise<Schedule<T>>
+```
+</TypeScriptExample>
+
+Schedule a task to run repeatedly at a fixed interval.
+
+### getSchedule()
+
+<TypeScriptExample>
+```typescript
+async getSchedule<T = string>(id: string): Promise<Schedule<T> | undefined>
+```
+</TypeScriptExample>
+
+Get a scheduled task by ID.
+
+### getSchedules()
+
+<TypeScriptExample>
+```typescript
+getSchedules<T = string>(criteria?: {
+  id?: string;
+  type?: "scheduled" | "delayed" | "cron" | "interval";
+  timeRange?: { start?: Date; end?: Date };
+}): Schedule<T>[]
+```
+</TypeScriptExample>
+
+Get scheduled tasks matching the criteria.
+
+### cancelSchedule()
+
+<TypeScriptExample>
+```typescript
+async cancelSchedule(id: string): Promise<boolean>
+```
+</TypeScriptExample>
+
+Cancel a scheduled task. Returns `true` if cancelled, `false` if not found.
+
+## Next Steps
+
+- [Callable Methods](/agents/concepts/callable-methods/) - Trigger schedules from client calls
+- [State Management](/agents/concepts/state/) - Update state from scheduled tasks
+- [Webhooks](/agents/guides/webhooks/) - Schedule tasks from webhook events

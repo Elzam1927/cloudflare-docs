@@ -1,0 +1,271 @@
+---
+title: Getting Started
+pcx_content_type: guide
+sidebar:
+  order: 1
+---
+
+import { PackageManagers, WranglerConfig, TypeScriptExample } from "~/components";
+
+Build AI agents that persist, think, and act. Agents run on Cloudflare's global network, maintain state across requests, and connect to clients in real-time via WebSockets.
+
+**What you will build:** A counter agent with persistent state that syncs to a React frontend in real-time.
+
+**Time:** Approximately 10 minutes
+
+---
+
+## Create a New Project
+
+<PackageManagers name="create cloudflare@latest" args="-- --template cloudflare/agents-starter" />
+
+```sh
+cd my-agent
+```
+
+<PackageManagers name="install" />
+
+This creates a project with:
+
+- `src/server.ts` - Your agent code
+- `src/client.tsx` - React frontend
+- `wrangler.jsonc` - Cloudflare configuration
+
+Start the dev server:
+
+<PackageManagers name="run dev" />
+
+Open [http://localhost:5173](http://localhost:5173) to see your agent in action.
+
+---
+
+## Your First Agent
+
+Let's build a simple counter agent from scratch. Replace `src/server.ts`:
+
+<TypeScriptExample>
+```typescript
+import { Agent, routeAgentRequest } from "agents";
+
+// Define the state shape
+type CounterState = {
+  count: number;
+};
+
+// Create the agent
+export class Counter extends Agent<Env, CounterState> {
+  // Initial state for new instances
+  initialState: CounterState = { count: 0 };
+
+  // Methods can be called from the client
+  increment() {
+    this.setState({ count: this.state.count + 1 });
+    return this.state.count;
+  }
+
+  decrement() {
+    this.setState({ count: this.state.count - 1 });
+    return this.state.count;
+  }
+
+  reset() {
+    this.setState({ count: 0 });
+  }
+}
+
+// Route requests to agents
+export default {
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    return (
+      routeAgentRequest(request, env) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+</TypeScriptExample>
+
+Update `wrangler.jsonc` to register the agent:
+
+<WranglerConfig>
+```jsonc
+{
+  "name": "my-agent",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "Counter",
+        "class_name": "Counter"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Counter"]
+    }
+  ]
+}
+```
+</WranglerConfig>
+
+---
+
+## Connect from React
+
+Replace `src/client.tsx`:
+
+<TypeScriptExample>
+```tsx
+import { useState } from "react";
+import { useAgent } from "agents/react";
+
+// Match your agent's state type
+type CounterState = {
+  count: number;
+};
+
+export default function App() {
+  const [count, setCount] = useState(0);
+
+  // Connect to the Counter agent
+  const agent = useAgent<CounterState>({
+    agent: "Counter",
+    onStateUpdate: (state) => setCount(state.count)
+  });
+
+  return (
+    <div style={{ padding: "2rem", fontFamily: "system-ui" }}>
+      <h1>Counter Agent</h1>
+      <p style={{ fontSize: "3rem" }}>{count}</p>
+      <div style={{ display: "flex", gap: "1rem" }}>
+        <button onClick={() => agent.stub.decrement()}>-</button>
+        <button onClick={() => agent.stub.reset()}>Reset</button>
+        <button onClick={() => agent.stub.increment()}>+</button>
+      </div>
+    </div>
+  );
+}
+```
+</TypeScriptExample>
+
+Key points:
+
+- **`useAgent`** connects to your agent via WebSocket
+- **`onStateUpdate`** fires whenever the agent's state changes
+- **`agent.stub.methodName()`** calls methods on your agent
+
+---
+
+## What Just Happened?
+
+When you clicked the button:
+
+1. **Client** called `agent.stub.increment()` over WebSocket
+2. **Agent** ran `increment()`, updated state with `setState()`
+3. **State** persisted to SQLite automatically
+4. **Broadcast** sent to all connected clients
+5. **React** updated via `onStateUpdate`
+
+```
+┌─────────────┐         ┌─────────────┐
+│   Browser   │◄───────►│    Agent    │
+│  (React)    │   WS    │  (Counter)  │
+└─────────────┘         └──────┬──────┘
+                               │
+                        ┌──────▼──────┐
+                        │   SQLite    │
+                        │  (State)    │
+                        └─────────────┘
+```
+
+### Key Concepts
+
+| Concept              | What it means                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| **Agent instance**   | Each unique name gets its own agent. `Counter:user-123` is separate from `Counter:user-456` |
+| **Persistent state** | State survives restarts, deploys, and hibernation. It is stored in SQLite                    |
+| **Real-time sync**   | All clients connected to the same agent receive state updates instantly                     |
+| **Hibernation**      | When no clients are connected, the agent hibernates (no cost). It wakes on the next request |
+
+---
+
+## Connect from Vanilla JS
+
+If you are not using React:
+
+<TypeScriptExample>
+```typescript
+import { AgentClient } from "agents/client";
+
+const agent = new AgentClient({
+  agent: "Counter",
+  name: "my-counter", // optional, defaults to "default"
+  onStateUpdate: (state) => {
+    console.log("New count:", state.count);
+  }
+});
+
+// Call methods
+await agent.call("increment");
+await agent.call("reset");
+```
+</TypeScriptExample>
+
+---
+
+## Deploy to Cloudflare
+
+<PackageManagers name="run deploy" />
+
+Your agent is now live on Cloudflare's global network, running close to your users.
+
+---
+
+## Next Steps
+
+Now that you have a working agent, explore these topics:
+
+- **[State Management](/agents/concepts/state/)** - Deep dive into `setState()`, `initialState`, and `onStateUpdate()`
+- **[Client SDK](/agents/guides/client-sdk/)** - Full `useAgent` and `AgentClient` API reference
+- **[Scheduling](/agents/guides/scheduling/)** - Run tasks on a delay, schedule, or cron
+- **[Agent Class](/agents/concepts/agent-class/)** - Lifecycle methods, HTTP handlers, and WebSocket events
+
+---
+
+## Troubleshooting
+
+### Agent not found / 404 errors
+
+Make sure:
+
+1. Agent class is exported from your server file
+2. `wrangler.jsonc` has the binding and migration
+3. Agent name in client matches the class name (case-insensitive)
+
+### State not syncing
+
+Check that:
+
+1. You are calling `this.setState()`, not mutating `this.state` directly
+2. The `onStateUpdate` callback is wired up in your client
+3. WebSocket connection is established (check browser dev tools)
+
+### Type errors with agent.stub
+
+Add the agent type parameter:
+
+<TypeScriptExample>
+```typescript
+const agent = useAgent<CounterState, Counter>({
+  agent: "Counter",
+  onStateUpdate: (state) => setCount(state.count)
+});
+
+// Now agent.stub is fully typed
+agent.stub.increment(); // ✓ TypeScript knows this method exists
+```
+</TypeScriptExample>

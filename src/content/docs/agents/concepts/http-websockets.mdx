@@ -1,0 +1,316 @@
+---
+title: HTTP and WebSockets
+pcx_content_type: concept
+sidebar:
+  order: 4
+---
+
+import { TypeScriptExample } from "~/components";
+
+Agents handle both HTTP requests and WebSocket connections, giving you flexibility to build REST APIs, real-time applications, or hybrid architectures.
+
+## Overview
+
+Every agent can respond to:
+
+- **HTTP requests** via `onRequest()` - REST APIs, webhooks, file uploads
+- **WebSocket connections** via `onConnect()`, `onMessage()`, `onClose()` - Real-time bidirectional communication
+
+<TypeScriptExample>
+```typescript
+import { Agent } from "agents";
+
+export class MyAgent extends Agent {
+  // Handle HTTP requests
+  onRequest(request: Request): Response {
+    return new Response("Hello from HTTP!");
+  }
+
+  // Handle WebSocket connections
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    connection.send("Welcome!");
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    // Echo back
+    connection.send(message);
+  }
+}
+```
+</TypeScriptExample>
+
+## Lifecycle Hooks
+
+Agents have several lifecycle hooks that are called at different points:
+
+| Hook                                          | When Called                                               |
+| --------------------------------------------- | --------------------------------------------------------- |
+| `onStart(props?)`                             | Once when the agent first starts (before any connections) |
+| `onRequest(request)`                          | When an HTTP request is received (non-WebSocket)          |
+| `onConnect(connection, ctx)`                  | When a new WebSocket connection is established            |
+| `onMessage(connection, message)`              | When a WebSocket message is received                      |
+| `onClose(connection, code, reason, wasClean)` | When a WebSocket connection closes                        |
+| `onError(connection, error)`                  | When a WebSocket error occurs                             |
+
+## HTTP Requests
+
+Handle HTTP requests with `onRequest()`. This is called for any non-WebSocket request to your agent.
+
+<TypeScriptExample>
+```typescript
+export class ApiAgent extends Agent {
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Route by path
+    if (url.pathname.endsWith("/status")) {
+      return Response.json({
+        status: "ok",
+        connections: this.getConnections().length
+      });
+    }
+
+    if (url.pathname.endsWith("/data") && request.method === "POST") {
+      const data = await request.json();
+      // Process data...
+      return Response.json({ received: true });
+    }
+
+    return new Response("Not found", { status: 404 });
+  }
+}
+```
+</TypeScriptExample>
+
+## WebSocket Connections
+
+WebSockets enable real-time bidirectional communication between clients and your agent.
+
+### Connection Lifecycle
+
+<TypeScriptExample>
+```typescript
+export class ChatAgent extends Agent {
+  // Called when a client connects
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    // ctx.request contains the original HTTP request (for auth, headers, etc.)
+    const url = new URL(ctx.request.url);
+    const token = url.searchParams.get("token");
+
+    console.log(`Client ${connection.id} connected`);
+    connection.send(JSON.stringify({ type: "welcome", id: connection.id }));
+  }
+
+  // Called for each message from this connection
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message === "string") {
+      const data = JSON.parse(message);
+      // Handle message...
+    } else {
+      // Binary message (ArrayBuffer)
+    }
+  }
+
+  // Called when connection closes
+  onClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ) {
+    console.log(`Client ${connection.id} disconnected: ${code} ${reason}`);
+  }
+
+  // Called on WebSocket errors
+  onError(connection: Connection, error: unknown) {
+    console.error(`Error on connection ${connection.id}:`, error);
+  }
+}
+```
+</TypeScriptExample>
+
+### The Connection Object
+
+Each WebSocket connection is represented by a `Connection` object:
+
+<TypeScriptExample>
+```typescript
+interface Connection<TState = unknown> {
+  /** Unique connection identifier */
+  id: string;
+
+  /** The agent instance name this connection belongs to */
+  server: string;
+
+  /** Per-connection state (read-only, use setState to update) */
+  state: TState | null;
+
+  /** Update connection state */
+  setState(state: TState | ((prev: TState | null) => TState)): void;
+
+  /** Send a message to this connection */
+  send(message: string | ArrayBuffer): void;
+
+  /** Close this connection */
+  close(code?: number, reason?: string): void;
+}
+```
+</TypeScriptExample>
+
+## Connection Management
+
+### Getting Connections
+
+<TypeScriptExample>
+```typescript
+// Get all connections
+const connections = this.getConnections();
+
+// Get a specific connection by ID
+const connection = this.getConnection("abc123");
+
+// Get connections with a specific tag
+const adminConnections = this.getConnections("admin");
+```
+</TypeScriptExample>
+
+### Broadcasting
+
+Send a message to all connected clients:
+
+<TypeScriptExample>
+```typescript
+// Broadcast to everyone
+this.broadcast(JSON.stringify({ type: "update", data: "..." }));
+
+// Broadcast to everyone except specific connections
+this.broadcast(
+  JSON.stringify({ type: "user-typing", userId: "123" }),
+  ["connection-id-to-exclude"] // Do not send to the originator
+);
+```
+</TypeScriptExample>
+
+## Per-Connection State
+
+Store data specific to each connection using `connection.state` and `connection.setState()`:
+
+<TypeScriptExample>
+```typescript
+type ConnectionState = {
+  username: string;
+  joinedAt: number;
+  messageCount: number;
+};
+
+export class ChatAgent extends Agent {
+  onConnect(connection: Connection<ConnectionState>, ctx: ConnectionContext) {
+    const url = new URL(ctx.request.url);
+
+    // Initialize connection state
+    connection.setState({
+      username: url.searchParams.get("username") || "Anonymous",
+      joinedAt: Date.now(),
+      messageCount: 0
+    });
+  }
+
+  onMessage(connection: Connection<ConnectionState>, message: WSMessage) {
+    // Update message count using functional update
+    connection.setState((prev) => ({
+      ...prev!,
+      messageCount: (prev?.messageCount || 0) + 1
+    }));
+
+    // Access current state
+    const { username, messageCount } = connection.state!;
+    console.log(`${username} sent message #${messageCount}`);
+  }
+}
+```
+</TypeScriptExample>
+
+## Common Patterns
+
+### Chat Room with Broadcast
+
+<TypeScriptExample>
+```typescript
+export class ChatRoom extends Agent {
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    const url = new URL(ctx.request.url);
+    const username = url.searchParams.get("username") || "Anonymous";
+
+    connection.setState({ username });
+
+    // Notify others
+    this.broadcast(
+      JSON.stringify({
+        type: "join",
+        user: username,
+        timestamp: Date.now()
+      }),
+      [connection.id] // Do not send to the joining user
+    );
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+
+    const { username } = connection.state as { username: string };
+
+    // Broadcast to everyone
+    this.broadcast(
+      JSON.stringify({
+        type: "message",
+        user: username,
+        text: message,
+        timestamp: Date.now()
+      })
+    );
+  }
+}
+```
+</TypeScriptExample>
+
+## Hibernation
+
+Agents support hibernation - they can sleep when inactive and wake when needed. This saves resources while maintaining WebSocket connections.
+
+### What Persists Across Hibernation
+
+| Persists                   | Does Not Persist    |
+| -------------------------- | ------------------- |
+| `this.state` (agent state) | In-memory variables |
+| `connection.state`         | Timers/intervals    |
+| SQLite data (`this.sql`)   | Promises in flight  |
+| Connection metadata        | Local caches        |
+
+**Best Practice:** Store important data in `this.state` or SQLite, not in class properties.
+
+## API Reference
+
+### Agent Lifecycle Methods
+
+| Method      | Signature                                                       | Description                   |
+| ----------- | --------------------------------------------------------------- | ----------------------------- |
+| `onStart`   | `(props?) => void \| Promise<void>`                             | Called once when agent starts |
+| `onRequest` | `(request: Request) => Response \| Promise<Response>`           | Handle HTTP requests          |
+| `onConnect` | `(connection, ctx) => void \| Promise<void>`                    | WebSocket connected           |
+| `onMessage` | `(connection, message) => void \| Promise<void>`                | Message received              |
+| `onClose`   | `(connection, code, reason, wasClean) => void \| Promise<void>` | Connection closed             |
+| `onError`   | `(connection, error) => void \| Promise<void>`                  | WebSocket error               |
+
+### Connection Management Methods
+
+| Method              | Signature                                 | Description                            |
+| ------------------- | ----------------------------------------- | -------------------------------------- |
+| `getConnections`    | `(tag?: string) => Iterable<Connection>`  | Get all connections, optionally by tag |
+| `getConnection`     | `(id: string) => Connection \| undefined` | Get connection by ID                   |
+| `getConnectionTags` | `(connection, ctx) => string[]`           | Override to tag connections            |
+| `broadcast`         | `(message, without?: string[]) => void`   | Send to all connections                |
+
+## Next Steps
+
+- [Callable Methods](/agents/concepts/callable-methods/) - Expose methods to clients via RPC
+- [State Management](/agents/concepts/state/) - Manage agent state and synchronization

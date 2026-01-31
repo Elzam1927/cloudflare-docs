@@ -1,0 +1,362 @@
+---
+title: Configuration
+pcx_content_type: reference
+sidebar:
+  order: 1
+---
+
+import { PackageManagers, WranglerConfig, TypeScriptExample } from "~/components";
+
+This guide covers everything you need to configure agents for local development and production deployment, including wrangler.jsonc setup, type generation, environment variables, and the Cloudflare dashboard.
+
+## wrangler.jsonc
+
+The `wrangler.jsonc` file configures your Cloudflare Worker and its bindings. Here is a complete example for an agents project:
+
+<WranglerConfig>
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-agent-app",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Static assets (optional)
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+
+  // Durable Object bindings for agents
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MyAgent",
+        "class_name": "MyAgent"
+      },
+      {
+        "name": "ChatAgent",
+        "class_name": "ChatAgent"
+      }
+    ]
+  },
+
+  // Required: Enable SQLite storage for agents
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MyAgent", "ChatAgent"]
+    }
+  ],
+
+  // AI binding (optional, for Workers AI)
+  "ai": {
+    "binding": "AI"
+  }
+}
+```
+</WranglerConfig>
+
+### Key Fields
+
+#### compatibility_flags
+
+The `nodejs_compat` flag is **required** for agents:
+
+<WranglerConfig>
+```jsonc
+"compatibility_flags": ["nodejs_compat"]
+```
+</WranglerConfig>
+
+This enables Node.js compatibility mode, which agents depend on for crypto, streams, and other Node.js APIs.
+
+#### durable_objects.bindings
+
+Each agent class needs a binding:
+
+<WranglerConfig>
+```jsonc
+"durable_objects": {
+  "bindings": [
+    {
+      "name": "Counter",      // Property name on `env` (env.Counter)
+      "class_name": "Counter" // Exported class name (must match exactly)
+    }
+  ]
+}
+```
+</WranglerConfig>
+
+| Field        | Description                                                 |
+| ------------ | ----------------------------------------------------------- |
+| `name`       | The property name on `env`. Use this in code: `env.Counter` |
+| `class_name` | Must match the exported class name exactly                  |
+
+#### migrations
+
+Migrations tell Cloudflare how to set up storage for your Durable Objects:
+
+<WranglerConfig>
+```jsonc
+"migrations": [
+  {
+    "tag": "v1",
+    "new_sqlite_classes": ["MyAgent"]
+  }
+]
+```
+</WranglerConfig>
+
+## Generating Types
+
+Wrangler can generate TypeScript types for your bindings.
+
+### Automatic Generation
+
+Run the types command:
+
+<PackageManagers name="wrangler types" />
+
+This creates or updates `worker-configuration.d.ts` with your `Env` type.
+
+### Without Runtime Types
+
+For cleaner output (recommended for agents):
+
+```sh
+npx wrangler types env.d.ts --include-runtime false
+```
+
+This generates just your bindings without Cloudflare runtime types.
+
+### Manual Type Definition
+
+You can also define types manually:
+
+<TypeScriptExample>
+```typescript
+// env.d.ts
+import type { Counter } from "./src/agents/counter";
+import type { ChatAgent } from "./src/agents/chat";
+
+interface Env {
+  // Secrets
+  OPENAI_API_KEY: string;
+  WEBHOOK_SECRET: string;
+
+  // Agent bindings
+  Counter: DurableObjectNamespace<Counter>;
+  ChatAgent: DurableObjectNamespace<ChatAgent>;
+
+  // Other bindings
+  AI: Ai;
+  ASSETS: Fetcher;
+  MY_KV: KVNamespace;
+}
+```
+</TypeScriptExample>
+
+## Environment Variables and Secrets
+
+### Local Development (.env)
+
+Create a `.env` file for local secrets (add to `.gitignore`):
+
+```bash
+# .env
+OPENAI_API_KEY=sk-...
+GITHUB_WEBHOOK_SECRET=whsec_...
+DATABASE_URL=postgres://...
+```
+
+Access in your agent:
+
+<TypeScriptExample>
+```typescript
+class MyAgent extends Agent<Env> {
+  async onStart() {
+    const apiKey = process.env.OPENAI_API_KEY;
+  }
+}
+```
+</TypeScriptExample>
+
+### Production Secrets
+
+Use `wrangler secret` for production:
+
+```bash
+# Add a secret
+wrangler secret put OPENAI_API_KEY
+# Enter value when prompted
+
+# List secrets
+wrangler secret list
+
+# Delete a secret
+wrangler secret delete OPENAI_API_KEY
+```
+
+### Non-Secret Variables
+
+For non-sensitive configuration, use `vars` in wrangler.jsonc:
+
+<WranglerConfig>
+```jsonc
+{
+  "vars": {
+    "API_BASE_URL": "https://api.example.com",
+    "MAX_RETRIES": "3",
+    "DEBUG_MODE": "false"
+  }
+}
+```
+</WranglerConfig>
+
+## Local Development
+
+### Starting the Dev Server
+
+With Vite (recommended for full stack apps):
+
+<PackageManagers name="vite dev" />
+
+Without Vite:
+
+<PackageManagers name="wrangler dev" />
+
+### Local State Persistence
+
+Durable Object state is persisted locally in `.wrangler/state/`.
+
+### Clearing Local State
+
+To reset all local Durable Object state:
+
+```bash
+rm -rf .wrangler/state
+```
+
+Or restart with fresh state:
+
+```bash
+npx wrangler dev --persist-to=""
+```
+
+## Production Deployment
+
+### Basic Deploy
+
+<PackageManagers name="wrangler deploy" />
+
+This:
+
+1. Bundles your code
+2. Uploads to Cloudflare
+3. Applies migrations
+4. Makes it live on `*.workers.dev`
+
+### Custom Domain
+
+Add a route in wrangler.jsonc:
+
+<WranglerConfig>
+```jsonc
+{
+  "routes": [
+    {
+      "pattern": "agents.example.com/*",
+      "zone_name": "example.com"
+    }
+  ]
+}
+```
+</WranglerConfig>
+
+## Migrations
+
+Migrations manage Durable Object storage schema changes.
+
+### Adding a New Agent
+
+Add to `new_sqlite_classes` in a new migration:
+
+<WranglerConfig>
+```jsonc
+"migrations": [
+  {
+    "tag": "v1",
+    "new_sqlite_classes": ["ExistingAgent"]
+  },
+  {
+    "tag": "v2",
+    "new_sqlite_classes": ["NewAgent"]
+  }
+]
+```
+</WranglerConfig>
+
+### Renaming an Agent Class
+
+Use `renamed_classes`:
+
+<WranglerConfig>
+```jsonc
+"migrations": [
+  {
+    "tag": "v1",
+    "new_sqlite_classes": ["OldName"]
+  },
+  {
+    "tag": "v2",
+    "renamed_classes": [
+      {
+        "from": "OldName",
+        "to": "NewName"
+      }
+    ]
+  }
+]
+```
+</WranglerConfig>
+
+## Troubleshooting
+
+### No such Durable Object class
+
+The class is not in migrations:
+
+<WranglerConfig>
+```jsonc
+"migrations": [
+  {
+    "tag": "v1",
+    "new_sqlite_classes": ["MissingClassName"]  // Add it here
+  }
+]
+```
+</WranglerConfig>
+
+### Cannot find module in types
+
+Regenerate types:
+
+```bash
+npx wrangler types env.d.ts --include-runtime false
+```
+
+### Secrets not loading locally
+
+Check that `.env` exists and contains the variable:
+
+```bash
+cat .env
+# Should show: MY_SECRET=value
+```
+
+## Next Steps
+
+- [Limits](/agents/platform/limits/) - Platform limits and quotas
+- [Agent Class](/agents/concepts/agent-class/) - Agent lifecycle and methods

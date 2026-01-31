@@ -1,0 +1,306 @@
+---
+title: Routing
+pcx_content_type: concept
+sidebar:
+  order: 3
+---
+
+import { TypeScriptExample } from "~/components";
+
+This guide explains how requests are routed to agents, how naming works, and patterns for organizing your agents.
+
+## How Routing Works
+
+When a request comes in, `routeAgentRequest()` examines the URL and routes it to the appropriate agent instance:
+
+```
+https://your-worker.dev/agents/{agent-name}/{instance-name}
+                              └─────┬─────┘ └─────┬──────┘
+                            Class name      Unique instance ID
+                            (kebab-case)
+```
+
+**Example URLs:**
+
+| URL                        | Agent Class | Instance   |
+| -------------------------- | ----------- | ---------- |
+| `/agents/counter/user-123` | `Counter`   | `user-123` |
+| `/agents/chat-room/lobby`  | `ChatRoom`  | `lobby`    |
+| `/agents/my-agent/default` | `MyAgent`   | `default`  |
+
+## Name Resolution
+
+Agent class names are automatically converted to kebab-case for URLs:
+
+| Class Name    | URL Path                   |
+| ------------- | -------------------------- |
+| `Counter`     | `/agents/counter/...`      |
+| `MyAgent`     | `/agents/my-agent/...`     |
+| `ChatRoom`    | `/agents/chat-room/...`    |
+| `AIAssistant` | `/agents/ai-assistant/...` |
+
+The router matches both the original name and kebab-case version, so these all work:
+
+- `useAgent({ agent: "Counter" })` → `/agents/counter/...`
+- `useAgent({ agent: "counter" })` → `/agents/counter/...`
+
+## Using routeAgentRequest()
+
+The `routeAgentRequest()` function is the main entry point for agent routing:
+
+<TypeScriptExample>
+```typescript
+import { routeAgentRequest } from "agents";
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    // Route to agents - returns Response or undefined
+    const agentResponse = await routeAgentRequest(request, env);
+
+    if (agentResponse) {
+      return agentResponse;
+    }
+
+    // No agent matched - handle other routes
+    return new Response("Not found", { status: 404 });
+  }
+};
+```
+</TypeScriptExample>
+
+### Enabling CORS
+
+For cross-origin requests (common when your frontend is on a different domain):
+
+<TypeScriptExample>
+```typescript
+const response = await routeAgentRequest(request, env, {
+  cors: true // Enable default CORS headers
+});
+```
+</TypeScriptExample>
+
+Or with custom CORS headers:
+
+<TypeScriptExample>
+```typescript
+const response = await routeAgentRequest(request, env, {
+  cors: {
+    "Access-Control-Allow-Origin": "https://myapp.com",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization"
+  }
+});
+```
+</TypeScriptExample>
+
+## Instance Naming Patterns
+
+The instance name (the last part of the URL) determines which agent instance handles the request. Each unique name gets its own isolated agent with its own state.
+
+### Per-User Agents
+
+Each user gets their own agent instance:
+
+<TypeScriptExample>
+```typescript
+// Client
+const agent = useAgent({
+  agent: "UserProfile",
+  name: `user-${userId}` // e.g., "user-abc123"
+});
+```
+</TypeScriptExample>
+
+```
+/agents/user-profile/user-abc123  → User abc123's agent
+/agents/user-profile/user-xyz789  → User xyz789's agent (separate instance)
+```
+
+### Shared Rooms
+
+Multiple users share the same agent instance:
+
+<TypeScriptExample>
+```typescript
+// Client
+const agent = useAgent({
+  agent: "ChatRoom",
+  name: roomId // e.g., "general" or "room-42"
+});
+```
+</TypeScriptExample>
+
+```
+/agents/chat-room/general  → All users in "general" share this agent
+```
+
+### Global Singleton
+
+A single instance for the entire application:
+
+<TypeScriptExample>
+```typescript
+// Client
+const agent = useAgent({
+  agent: "AppConfig",
+  name: "default" // Or any consistent name
+});
+```
+</TypeScriptExample>
+
+## Custom URL Routing
+
+For advanced use cases where you need control over the URL structure, you can bypass the default `/agents/{agent}/{name}` pattern.
+
+### Using basePath (Client-Side)
+
+The `basePath` option lets clients connect to any URL path:
+
+<TypeScriptExample>
+```typescript
+// Client connects to /user instead of /agents/user-agent/...
+const agent = useAgent({
+  agent: "UserAgent", // Required but ignored when basePath is set
+  basePath: "user" // → connects to /user
+});
+```
+</TypeScriptExample>
+
+### Server-Side Instance Selection
+
+When using `basePath`, the server must handle routing. Use `getAgentByName()` to get the agent instance, then forward the request with `fetch()`:
+
+<TypeScriptExample>
+```typescript
+export default {
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    // Custom routing - server determines instance from session
+    if (url.pathname === "/user") {
+      const session = await getSession(request);
+      const agent = await getAgentByName(env.UserAgent, session.userId);
+      return agent.fetch(request); // Forward request directly to agent
+    }
+
+    // Default routing for standard /agents/... paths
+    return (
+      routeAgentRequest(request, env) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+</TypeScriptExample>
+
+## Server-Side Agent Access
+
+You can access agents from your Worker code using `getAgentByName()` for RPC calls:
+
+<TypeScriptExample>
+```typescript
+import { getAgentByName, routeAgentRequest } from "agents";
+
+export default {
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    // API endpoint that interacts with an agent
+    if (url.pathname === "/api/increment") {
+      const counter = await getAgentByName(env.Counter, "global-counter");
+      const newCount = await counter.increment();
+      return Response.json({ count: newCount });
+    }
+
+    // Regular agent routing
+    return (
+      routeAgentRequest(request, env) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+</TypeScriptExample>
+
+## Multiple Agents
+
+You can have multiple agent classes in one project. Each gets its own namespace:
+
+<TypeScriptExample>
+```typescript
+// server.ts
+export { Counter } from "./agents/counter";
+export { ChatRoom } from "./agents/chat-room";
+export { UserProfile } from "./agents/user-profile";
+
+export default {
+  async fetch(request: Request, env: Env) {
+    return (
+      routeAgentRequest(request, env) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+</TypeScriptExample>
+
+## Routing with Authentication
+
+Check authentication before routing to agents:
+
+<TypeScriptExample>
+```typescript
+export default {
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    // Protect agent routes
+    if (url.pathname.startsWith("/agents/")) {
+      const user = await authenticate(request, env);
+      if (!user) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      // Optionally, enforce that users can only access their own agents
+      const instanceName = url.pathname.split("/")[3];
+      if (instanceName !== `user-${user.id}`) {
+        return new Response("Forbidden", { status: 403 });
+      }
+    }
+
+    return (
+      routeAgentRequest(request, env) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+</TypeScriptExample>
+
+## API Reference
+
+### routeAgentRequest()
+
+Routes a request to the appropriate agent.
+
+| Parameter      | Type                     | Description                     |
+| -------------- | ------------------------ | ------------------------------- |
+| `request`      | `Request`                | The incoming request            |
+| `env`          | `Env`                    | Environment with agent bindings |
+| `options.cors` | `boolean \| HeadersInit` | Enable CORS headers             |
+
+**Returns:** `Promise<Response \| undefined>` - Response if matched, undefined if no agent route
+
+### getAgentByName()
+
+Get an agent instance by name for server-side RPC or request forwarding.
+
+| Parameter              | Type                        | Description            |
+| ---------------------- | --------------------------- | ---------------------- |
+| `namespace`            | `DurableObjectNamespace<T>` | Agent binding from env |
+| `name`                 | `string`                    | Instance name          |
+| `options.locationHint` | `string`                    | Preferred location     |
+| `options.jurisdiction` | `string`                    | Data jurisdiction      |
+
+**Returns:** `Promise<DurableObjectStub<T>>` - Typed stub for calling agent methods or forwarding requests

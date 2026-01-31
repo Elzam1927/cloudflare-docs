@@ -1,0 +1,110 @@
+---
+title: getCurrentAgent()
+pcx_content_type: concept
+sidebar:
+  order: 6
+---
+
+import { TypeScriptExample } from "~/components";
+
+## Automatic Context for Custom Methods
+
+**All custom methods automatically have full agent context.** The framework automatically detects and wraps your custom methods during initialization, ensuring `getCurrentAgent()` works seamlessly everywhere.
+
+## How It Works
+
+<TypeScriptExample>
+```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { getCurrentAgent } from "agents";
+
+export class MyAgent extends AIChatAgent {
+  async customMethod() {
+    const { agent } = getCurrentAgent<MyAgent>();
+    // ✅ agent is automatically available
+    console.log(agent.name);
+  }
+
+  async anotherMethod() {
+    // ✅ This works too - no setup needed
+    const { agent } = getCurrentAgent<MyAgent>();
+    return agent.state;
+  }
+}
+```
+</TypeScriptExample>
+
+**Zero configuration required.** The framework automatically:
+
+1. Scans your agent class for custom methods
+2. Wraps them with agent context during initialization
+3. Ensures `getCurrentAgent()` works in all external functions called from your methods
+
+## Real-World Example
+
+<TypeScriptExample>
+```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { getCurrentAgent } from "agents";
+import { generateText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+// External utility function that needs agent context
+async function processWithAI(prompt: string) {
+  const { agent } = getCurrentAgent<MyAgent>();
+  // ✅ External functions can access the current agent
+
+  return await generateText({
+    model: openai("gpt-4"),
+    prompt: `Agent ${agent?.name}: ${prompt}`
+  });
+}
+
+export class MyAgent extends AIChatAgent {
+  async customMethod(message: string) {
+    // Use this.* to access agent properties directly
+    console.log("Agent name:", this.name);
+    console.log("Agent state:", this.state);
+
+    // External functions automatically work
+    const result = await processWithAI(message);
+    return result.text;
+  }
+}
+```
+</TypeScriptExample>
+
+## API Reference
+
+### getCurrentAgent<T>()
+
+Gets the current agent from any context where it is available.
+
+**Returns:**
+
+<TypeScriptExample>
+```typescript
+{
+  agent: T | undefined,
+  connection: Connection | undefined,
+  request: Request | undefined
+}
+```
+</TypeScriptExample>
+
+**Usage:**
+
+<TypeScriptExample>
+```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { getCurrentAgent } from "agents";
+
+export class MyAgent extends AIChatAgent {
+  async customMethod() {
+    const { agent, connection, request } = getCurrentAgent<MyAgent>();
+    // agent is properly typed as MyAgent
+    // connection and request available if called from a request handler
+  }
+}
+```
+</TypeScriptExample>
